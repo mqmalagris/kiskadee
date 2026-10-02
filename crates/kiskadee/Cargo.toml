@@ -1,0 +1,20 @@
+[package]
+name = "kiskadee"
+description = "Terminal email for you and your AI agents: a local Broker, CLI, TUI and MCP server."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "kiskadee"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+kiskadee-core.workspace = true
+kiskadee-mail.workspace = true
+kiskadee-platform.workspace = true
+
+[lints]
+workspace = true

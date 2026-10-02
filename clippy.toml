@@ -1,0 +1,7 @@
+# The UntrustedText barrier (ADR 0001, docs/plans/0001 Phase 0).
+# Sender-controlled text may leave UntrustedText only through the serializer.
+# Any other call site fails the build; the one allowed site carries an explicit
+# `#[expect(clippy::disallowed_methods)]` so it stays greppable in review.
+disallowed-methods = [
+    { path = "kiskadee_mail::envelope::UntrustedText::expose_for_serializer", reason = "sender-controlled text must only leave UntrustedText through the Envelope serializer" },
+]

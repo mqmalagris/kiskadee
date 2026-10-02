@@ -1,0 +1,12 @@
+[package]
+name = "kiskadee-core"
+description = "kiskadee Broker core: Verbs, Capability tokens, Profiles and the Ledger. Free of email types."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

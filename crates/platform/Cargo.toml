@@ -1,0 +1,22 @@
+[package]
+name = "kiskadee-platform"
+description = "kiskadee OS integration: keychain, user presence, IPC transport and service install."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+interprocess = "2.4"
+keyring-core = "1"
+
+[lints]
+workspace = true
+
+[target."cfg(windows)".dependencies]
+widestring = "1"
+windows-native-keyring-store = "1.1.0"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
+
+[dev-dependencies]
+rand = "0.9"
