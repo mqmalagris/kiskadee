@@ -10,7 +10,9 @@ rust-version.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
+jmap-client = "0.4"
 serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true
