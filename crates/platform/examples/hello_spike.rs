@@ -47,7 +47,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(operation.join()?)
     };
 
-    if std::env::args().any(|arg| arg == "--cancel") {
+    let mode = std::env::args().nth(1).unwrap_or_default();
+    let sign_existing = || -> Result<KeyCredentialStatus, Box<dyn std::error::Error>> {
+        let opened = KeyCredentialManager::OpenAsync(&HSTRING::from(KEY_NAME))?.join()?;
+        if opened.Status()? != KeyCredentialStatus::Success {
+            return Err(format!("key not found: {:?}", opened.Status()?).into());
+        }
+        let signed = opened
+            .Credential()?
+            .RequestSignAsync(&CryptographicBuffer::CreateFromByteArray(CHALLENGE)?)?
+            .join()?;
+        Ok(signed.Status()?)
+    };
+    match mode.as_str() {
+        "--unlock" => {
+            println!("UNLOCK (process A): create the key, then sign. APPROVE the prompt(s).");
+            let created = KeyCredentialManager::RequestCreateAsync(
+                &HSTRING::from(KEY_NAME),
+                KeyCredentialCreationOption::ReplaceExisting,
+            )?
+            .join()?;
+            println!("   create status = {:?}", created.Status()?);
+            println!("   sign status = {:?}", sign_existing()?);
+            println!("Key kept. Now run --sign-only right away, and CANCEL any prompt you see.");
+            return Ok(());
+        }
+        "--sign-only" => {
+            println!("SIGN-ONLY (process B): if a prompt appears, CANCEL it.");
+            let started = std::time::Instant::now();
+            let status = sign_existing()?;
+            println!(
+                "   sign status = {status:?} after {:.1}s ({})",
+                started.elapsed().as_secs_f32(),
+                if status == KeyCredentialStatus::Success {
+                    "SIGNED: either you approved, or authorization crossed processes"
+                } else {
+                    "refused: process B had to ask, so reuse is per-process"
+                }
+            );
+            return Ok(());
+        }
+        "--delete" => {
+            KeyCredentialManager::DeleteAsync(&HSTRING::from(KEY_NAME))?.join()?;
+            println!("Deleted Hello key '{KEY_NAME}'");
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    if mode == "--cancel" {
         println!("CANCEL MODE");
         println!("A. Creating the Hello key: APPROVE this prompt...");
         let created = KeyCredentialManager::RequestCreateAsync(
