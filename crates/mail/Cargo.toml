@@ -10,9 +10,15 @@ rust-version.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
+kiskadee-platform.workspace = true
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+async-native-tls = { version = "0.6", default-features = false, features = ["runtime-tokio"] }
 jmap-client = "0.4"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-native-tls", "builder"] }
+oauth2 = "5"
 serde_json.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+webbrowser = "1"
 
 [lints]
 workspace = true
