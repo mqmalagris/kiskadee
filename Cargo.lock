@@ -1247,6 +1247,7 @@ version = "0.0.1"
 dependencies = [
  "async-imap",
  "async-native-tls",
+ "futures-util",
  "jmap-client",
  "kiskadee-platform",
  "lettre",
