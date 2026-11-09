@@ -53,7 +53,13 @@ impl<'a> Field<'a> {
 }
 
 pub(crate) fn canonical(fields: &[Field<'_>]) -> Vec<u8> {
-    let mut out = DOMAIN.to_vec();
+    encode(DOMAIN, fields)
+}
+
+/// The field encoding above under another domain string, for other
+/// records that need an unambiguous byte form (`tokens.db` rows).
+pub(crate) fn encode(domain: &[u8], fields: &[Field<'_>]) -> Vec<u8> {
+    let mut out = domain.to_vec();
     for field in fields {
         match field {
             Field::Null => out.push(0x00),
@@ -84,7 +90,13 @@ pub(crate) fn chain(prev_hash: &[u8; 32], canonical: &[u8]) -> [u8; 32] {
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }
 
 #[cfg(test)]

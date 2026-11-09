@@ -607,3 +607,54 @@ fn read_only_ledger_reads_but_refuses_writes() {
     ));
     assert_eq!(reader.verify().unwrap().entries, 3);
 }
+
+/// The 0.1 gate measures real use: a denied call (a bad, expired or
+/// out-of-scope token) is in the Ledger but isn't an agent read.
+#[test]
+fn stats_leave_denied_calls_out_of_agent_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ledger = Ledger::open(&dir.path().join("ledger.db"))
+        .unwrap()
+        .with_clock(|| Ok(10));
+    let used = ledger.begin(token("t1", "mail.read")).unwrap();
+    ledger.outcome(used, Status::Ok, None).unwrap();
+    let in_flight = ledger.begin(token("t1", "mail.list")).unwrap();
+    let refused = ledger.begin(token("t2", "mail.read")).unwrap();
+    ledger
+        .outcome(refused, Status::Denied, Some("token.expired"))
+        .unwrap();
+    let unknown = ledger
+        .begin(Call {
+            actor: Actor::UnknownToken,
+            ..call("mail.read")
+        })
+        .unwrap();
+    ledger
+        .outcome(unknown, Status::Denied, Some("token.unknown"))
+        .unwrap();
+
+    let stats = ledger.stats().unwrap();
+    assert_eq!(stats.tokens, 1, "only t1 made a call that wasn't denied");
+    assert_eq!(stats.days.len(), 1);
+    let day = &stats.days[0];
+    assert_eq!(
+        (day.calls, day.agent_calls, day.tokens),
+        (4, 2, 1),
+        "all four calls happened; two were agent use (#{used}, #{in_flight})"
+    );
+}
+
+#[test]
+fn a_foreign_sqlite_file_is_not_a_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.db");
+    let conn = raw(&path);
+    conn.execute_batch("CREATE TABLE notes (body TEXT);")
+        .unwrap();
+    drop(conn);
+    assert!(matches!(Ledger::open(&path), Err(Error::NotALedger(_))));
+    assert!(matches!(
+        Ledger::open_read_only(&path),
+        Err(Error::NotALedger(_))
+    ));
+}

@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 use kiskadee_core::ledger::{Body, Entry, Ledger, Status};
+use kiskadee_core::time::{DurationError, parse_duration};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -195,27 +196,12 @@ fn parse_since(value: &str, now: jiff::Timestamp) -> Result<i64> {
     if let Ok(ts) = value.parse::<jiff::Timestamp>() {
         return Ok(ts.as_millisecond());
     }
-    let split = value
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(value.len());
-    let (number, unit) = value.split_at(split);
-    let seconds = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3_600,
-        "d" => 86_400,
-        _ => 0,
-    };
-    let amount: i64 = number.parse().unwrap_or(0);
-    if seconds == 0 || amount <= 0 {
-        return Err(format!(
+    let back = parse_duration(value).map_err(|e| match e {
+        DurationError::TooLong => "--since is too far back".to_string(),
+        DurationError::Malformed => format!(
             "--since {value:?}: use a duration like 30m, 2h, 7d or a timestamp like 2026-10-29T08:00:00Z"
-        )
-        .into());
-    }
-    let back = amount
-        .checked_mul(seconds * 1_000)
-        .ok_or("--since is too far back")?;
+        ),
+    })?;
     Ok(now.as_millisecond().saturating_sub(back))
 }
 
