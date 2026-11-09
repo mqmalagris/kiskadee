@@ -37,8 +37,13 @@ const SCHEMA_VERSION: i64 = 1;
 
 const DAY_MS: i64 = 86_400_000;
 
-/// Matches rusqlite's default busy timeout.
-const WAL_RETRY_FOR: Duration = Duration::from_secs(5);
+/// How long a write waits for another connection's. Writers queue behind
+/// each other's `synchronous=FULL` commits, which take tens of milliseconds
+/// each on a slow disk, and every Verb call waits on its `begin` row, so
+/// waiting beats refusing the call. rusqlite's 5 s default ran out with 4
+/// writers on a Windows CI runner.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+const WAL_RETRY_FOR: Duration = BUSY_TIMEOUT;
 const WAL_RETRY_EVERY: Duration = Duration::from_millis(10);
 
 const SCHEMA: &str = r"
@@ -465,6 +470,7 @@ impl Ledger {
     }
 
     fn setup(mut conn: Connection) -> Result<Self> {
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         enable_wal(&conn)?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         // IMMEDIATE: two processes opening a new file at once both see
