@@ -4,5 +4,6 @@
 
 pub mod ipc;
 pub mod keychain;
+pub mod paths;
 #[cfg(windows)]
 mod windows_sid;

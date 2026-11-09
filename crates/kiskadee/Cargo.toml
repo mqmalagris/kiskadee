@@ -15,6 +15,11 @@ clap.workspace = true
 kiskadee-core.workspace = true
 kiskadee-mail.workspace = true
 kiskadee-platform.workspace = true
+jiff = "0.2"
+
+[dev-dependencies]
+rusqlite.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
