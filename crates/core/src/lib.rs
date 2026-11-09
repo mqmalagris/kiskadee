@@ -3,3 +3,5 @@
 //!
 //! This crate must not depend on email types; mail arrives through the
 //! `MailBackend` trait in `kiskadee-mail` (ADR 0002).
+
+pub mod ledger;
