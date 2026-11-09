@@ -17,34 +17,32 @@
 //! Rows hold ids, Verb names and digests only. Never put sender-controlled
 //! text (subjects, bodies, display names) in `target` or `detail`.
 
-mod encoding;
+pub(crate) mod encoding;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::LazyLock;
-use std::time::{Duration, Instant};
 
 use rusqlite::types::{Value, ValueRef};
-use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
+use crate::db::{self, FileKind, SetupError};
 pub use encoding::GENESIS;
 use encoding::{COLUMNS, FIELD_COUNT, Field};
 
 /// Schema version stored in `PRAGMA user_version`.
 const SCHEMA_VERSION: i64 = 1;
 
-const DAY_MS: i64 = 86_400_000;
+/// A Ledger file. Its `application_id` spells "kLdg".
+const FILE: FileKind = FileKind {
+    application_id: 0x6B4C_6467,
+    schema: SCHEMA,
+    version: SCHEMA_VERSION,
+};
 
-/// How long a write waits for another connection's. Writers queue behind
-/// each other's `synchronous=FULL` commits, which take tens of milliseconds
-/// each on a slow disk, and every Verb call waits on its `begin` row, so
-/// waiting beats refusing the call. rusqlite's 5 s default ran out with 4
-/// writers on a Windows CI runner.
-const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
-const WAL_RETRY_FOR: Duration = BUSY_TIMEOUT;
-const WAL_RETRY_EVERY: Duration = Duration::from_millis(10);
+const DAY_MS: i64 = 86_400_000;
 
 const SCHEMA: &str = r"
 CREATE TABLE entries (
@@ -112,16 +110,28 @@ fn column_name(index: usize) -> &'static str {
 pub enum Actor {
     /// An agent, by Capability token id (never the token itself).
     Token(String),
+    /// An agent whose token matched none. What it presented is never
+    /// recorded.
+    UnknownToken,
     /// The human, by session id.
     Human(String),
 }
 
-const TOKEN_PREFIX: &str = "token:";
+/// How [`Actor::UnknownToken`] is written; token ids are hex, so it can't
+/// collide with one.
+const UNKNOWN_TOKEN: &str = "unknown";
+
+/// A `begin` (aliased `e`) by an agent that wasn't refused. Denied calls,
+/// including every unknown token, aren't use and stay out of [`Stats`].
+const AGENT_USE: &str = "substr(e.actor, 1, 6) = 'token:'
+    AND NOT EXISTS (SELECT 1 FROM entries o
+        WHERE o.kind = 'outcome' AND o.begin_seq = e.seq AND o.status = 'denied')";
 
 impl fmt::Display for Actor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Actor::Token(id) => write!(f, "{TOKEN_PREFIX}{id}"),
+            Actor::Token(id) => write!(f, "token:{id}"),
+            Actor::UnknownToken => write!(f, "token:{UNKNOWN_TOKEN}"),
             Actor::Human(id) => write!(f, "human:{id}"),
         }
     }
@@ -131,6 +141,7 @@ impl FromStr for Actor {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self, Error> {
         match s.split_once(':') {
+            Some(("token", UNKNOWN_TOKEN)) => Ok(Actor::UnknownToken),
             Some(("token", id)) => Ok(Actor::Token(id.into())),
             Some(("human", id)) => Ok(Actor::Human(id.into())),
             _ => Err(Error::Corrupt(format!("unknown actor {s:?}"))),
@@ -334,7 +345,8 @@ pub struct Stats {
     /// Outcome counts in [`Status::ALL`] order.
     pub outcomes: [u64; Status::ALL.len()],
     pub orphans: u64,
-    /// Distinct Capability tokens that made at least one call.
+    /// Distinct Capability tokens that made at least one call that wasn't
+    /// denied.
     pub tokens: u64,
     pub first_ts_ms: Option<i64>,
     pub last_ts_ms: Option<i64>,
@@ -349,10 +361,10 @@ pub struct Day {
     pub start_ms: i64,
     /// Verb calls (`begin` rows), by anyone.
     pub calls: u64,
-    /// Calls made by agents. Agents can only read in 0.1, so these are the
-    /// 0.1 gate's "agent reads".
+    /// Calls made by agents and not denied. Agents can only read in 0.1, so
+    /// these are the 0.1 gate's "agent reads".
     pub agent_calls: u64,
-    /// Distinct tokens that made calls that day.
+    /// Distinct tokens that made calls that day, not counting denied ones.
     pub tokens: u64,
 }
 
@@ -434,8 +446,8 @@ impl From<rusqlite::Error> for Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// Milliseconds since the Unix epoch.
-pub type Clock = fn() -> Result<i64>;
+/// Milliseconds since the Unix epoch. A closure, so a test can move it.
+pub type Clock = Box<dyn Fn() -> Result<i64> + Send + Sync>;
 
 pub struct Ledger {
     conn: Connection,
@@ -445,7 +457,12 @@ pub struct Ledger {
 impl Ledger {
     /// Opens the Ledger at `path` for writing, creating it if needed.
     pub fn open(path: &Path) -> Result<Self> {
-        Self::setup(Connection::open(path)?)
+        let mut conn = Connection::open(path)?;
+        db::prepare(&mut conn, &FILE).map_err(|e| setup_error(e, path))?;
+        Ok(Ledger {
+            conn,
+            clock: Box::new(now_ms),
+        })
     }
 
     /// Opens an existing Ledger for reading. Never creates, migrates or
@@ -459,42 +476,19 @@ impl Ledger {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        match schema_version(&conn)? {
+        match db::identify(&conn, &FILE).map_err(|e| setup_error(e, path))? {
             SCHEMA_VERSION => Ok(Ledger {
                 conn,
-                clock: now_ms,
+                clock: Box::new(now_ms),
             }),
             0 => Err(Error::NotALedger(path.to_path_buf())),
             newer => Err(Error::NewerSchema(newer)),
         }
     }
 
-    fn setup(mut conn: Connection) -> Result<Self> {
-        conn.busy_timeout(BUSY_TIMEOUT)?;
-        enable_wal(&conn)?;
-        conn.pragma_update(None, "synchronous", "FULL")?;
-        // IMMEDIATE: two processes opening a new file at once both see
-        // version 0 unless the check runs under the write lock. The second
-        // waits here, then finds the schema the first created.
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        match schema_version(&tx)? {
-            0 => {
-                tx.execute_batch(SCHEMA)?;
-                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            }
-            SCHEMA_VERSION => {}
-            newer => return Err(Error::NewerSchema(newer)),
-        }
-        tx.commit()?;
-        Ok(Ledger {
-            conn,
-            clock: now_ms,
-        })
-    }
-
     /// Replaces the wall clock. For tests and replay.
-    pub fn with_clock(mut self, clock: Clock) -> Self {
-        self.clock = clock;
+    pub fn with_clock(mut self, clock: impl Fn() -> Result<i64> + Send + Sync + 'static) -> Self {
+        self.clock = Box::new(clock);
         self
     }
 
@@ -704,11 +698,12 @@ impl Ledger {
         // queries can't make the figures disagree.
         let tx = self.conn.unchecked_transaction()?;
         let mut stats = tx.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(kind = 'begin'), 0), MIN(ts_ms), MAX(ts_ms),
-                COUNT(DISTINCT CASE WHEN kind = 'begin' AND substr(actor, 1, 6) = ?1
-                    THEN actor END)
-             FROM entries",
-            [TOKEN_PREFIX],
+            &format!(
+                "SELECT COUNT(*), COALESCE(SUM(kind = 'begin'), 0), MIN(ts_ms), MAX(ts_ms),
+                    COUNT(DISTINCT CASE WHEN kind = 'begin' AND {AGENT_USE} THEN actor END)
+                 FROM entries e"
+            ),
+            [],
             |row| {
                 Ok(Stats {
                     entries: count(row.get(0)?),
@@ -737,13 +732,13 @@ impl Ledger {
             .begins
             .saturating_sub(stats.outcomes.iter().sum::<u64>());
 
-        let mut by_day = tx.prepare(
+        let mut by_day = tx.prepare(&format!(
             "SELECT ts_ms / ?1 AS day, COUNT(*),
-                COALESCE(SUM(substr(actor, 1, 6) = ?2), 0),
-                COUNT(DISTINCT CASE WHEN substr(actor, 1, 6) = ?2 THEN actor END)
-             FROM entries WHERE kind = 'begin' GROUP BY day ORDER BY day",
-        )?;
-        let mut rows = by_day.query(rusqlite::params![DAY_MS, TOKEN_PREFIX])?;
+                COALESCE(SUM({AGENT_USE}), 0),
+                COUNT(DISTINCT CASE WHEN {AGENT_USE} THEN actor END)
+             FROM entries e WHERE kind = 'begin' GROUP BY day ORDER BY day"
+        ))?;
+        let mut rows = by_day.query([DAY_MS])?;
         while let Some(row) = rows.next()? {
             stats.days.push(Day {
                 start_ms: row.get::<_, i64>(0)? * DAY_MS,
@@ -756,31 +751,13 @@ impl Ledger {
     }
 }
 
-/// Switching a new file to WAL needs an exclusive lock, and when two
-/// connections race for it SQLite answers BUSY at once instead of waiting
-/// out the busy timeout (waiting could deadlock). Retry for as long as the
-/// timeout would have waited.
-fn enable_wal(conn: &Connection) -> Result<()> {
-    let deadline = Instant::now() + WAL_RETRY_FOR;
-    loop {
-        match conn
-            .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))
-        {
-            Ok(mode) if mode.eq_ignore_ascii_case("wal") => return Ok(()),
-            Ok(mode) => return Err(Error::NoWal(mode)),
-            Err(e)
-                if e.sqlite_error_code() == Some(ErrorCode::DatabaseBusy)
-                    && Instant::now() < deadline =>
-            {
-                std::thread::sleep(WAL_RETRY_EVERY);
-            }
-            Err(e) => return Err(e.into()),
-        }
+fn setup_error(e: SetupError, path: &Path) -> Error {
+    match e {
+        SetupError::Sqlite(e) => Error::Sqlite(e),
+        SetupError::NoWal(mode) => Error::NoWal(mode),
+        SetupError::Newer(version) => Error::NewerSchema(version),
+        SetupError::WrongKind => Error::NotALedger(path.to_path_buf()),
     }
-}
-
-fn schema_version(conn: &Connection) -> Result<i64> {
-    Ok(conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
 }
 
 fn count(value: i64) -> u64 {
@@ -807,8 +784,5 @@ fn field_of(value: ValueRef<'_>) -> Option<Field<'_>> {
 }
 
 fn now_ms() -> Result<i64> {
-    let since_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| Error::Clock)?;
-    i64::try_from(since_epoch.as_millis()).map_err(|_| Error::Clock)
+    crate::time::now_ms().ok_or(Error::Clock)
 }
