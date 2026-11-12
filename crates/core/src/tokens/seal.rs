@@ -9,10 +9,10 @@ use sha2::Sha256;
 use crate::ledger::encoding::{self, Field};
 
 /// Domain string for row seals, so a seal can't be replayed as anything else.
-const SEAL_DOMAIN: &[u8] = b"kiskadee/tokens/v1";
+const SEAL_DOMAIN: &[u8] = b"kiskadee/tokens/v2";
 
 pub(super) const ROW_COLUMNS: &str =
-    "id, hash, profile, scope, created_ms, expires_ms, revoked_ms, seal";
+    "id, hash, profile, scope, created_ms, expires_ms, revoked_ms, reads_used, seal";
 
 /// The Broker's key for sealing `tokens.db` rows. Derived from the
 /// user-presence unlock once per Broker session (ADR 0004), never stored.
@@ -39,6 +39,8 @@ pub(super) struct Row {
     pub created_ms: i64,
     pub expires_ms: i64,
     pub revoked_ms: Option<i64>,
+    /// Messages whose content the token has received (its read budget used).
+    pub reads_used: i64,
     pub seal: Vec<u8>,
 }
 
@@ -52,7 +54,8 @@ impl Row {
             created_ms: row.get(4)?,
             expires_ms: row.get(5)?,
             revoked_ms: row.get(6)?,
-            seal: row.get(7)?,
+            reads_used: row.get(7)?,
+            seal: row.get(8)?,
         })
     }
 
@@ -66,6 +69,7 @@ impl Row {
             Field::Int(self.created_ms),
             Field::Int(self.expires_ms),
             self.revoked_ms.map_or(Field::Null, Field::Int),
+            Field::Int(self.reads_used),
         ];
         let mut mac =
             <Hmac<Sha256> as Mac>::new_from_slice(&key.0).expect("HMAC takes any key length");

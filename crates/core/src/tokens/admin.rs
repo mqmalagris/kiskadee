@@ -78,6 +78,8 @@ pub struct TokenInfo {
     pub created_ms: i64,
     pub expires_ms: i64,
     pub revoked_ms: Option<i64>,
+    /// Messages whose content the token has received.
+    pub reads_used: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,11 +158,14 @@ impl TokenStore {
             created_ms,
             expires_ms,
             revoked_ms: None,
+            reads_used: 0,
             seal: Vec::new(),
         }
         .sealed(&self.key);
         self.conn.execute(
-            &format!("INSERT INTO tokens ({ROW_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"),
+            &format!(
+                "INSERT INTO tokens ({ROW_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+            ),
             params![
                 row.id,
                 row.hash,
@@ -169,6 +174,7 @@ impl TokenStore {
                 row.created_ms,
                 row.expires_ms,
                 row.revoked_ms,
+                row.reads_used,
                 row.seal
             ],
         )?;
@@ -256,6 +262,7 @@ impl TokenStore {
                 created_ms: row.created_ms,
                 expires_ms: row.expires_ms,
                 revoked_ms: row.revoked_ms,
+                reads_used: u64::try_from(row.reads_used).unwrap_or(0),
             });
         }
         Ok(tokens)

@@ -756,6 +756,8 @@ fn setup_error(e: SetupError, path: &Path) -> Error {
         SetupError::Sqlite(e) => Error::Sqlite(e),
         SetupError::NoWal(mode) => Error::NoWal(mode),
         SetupError::Newer(version) => Error::NewerSchema(version),
+        // v1 is the first Ledger schema, so no file is older.
+        SetupError::Older(version) => Error::Corrupt(format!("unknown schema v{version}")),
         SetupError::WrongKind => Error::NotALedger(path.to_path_buf()),
     }
 }
