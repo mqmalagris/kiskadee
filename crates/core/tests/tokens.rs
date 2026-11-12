@@ -706,7 +706,7 @@ fn a_forged_row_is_refused_as_tampered() {
     f.tamper(&format!(
         "INSERT INTO tokens VALUES ('feedfacecafe', x'{hash}', 'readonly',
             '{{\"accounts\":\"*\",\"resources\":\"*\",\"verbs\":[\"send-request\"],\"read_budget\":1}}',
-            0, 9000000000000, NULL, zeroblob(32))"
+            0, 9000000000000, NULL, 0, zeroblob(32))"
     ));
     let denied = denial(f.call(&forged, Verb::SendRequest, Some("work"), None));
     assert_eq!(
@@ -908,12 +908,28 @@ fn a_tokens_db_from_a_newer_kiskadee_is_refused() {
     let f = fixture();
     drop(f.tokens);
     let conn = rusqlite::Connection::open(f.dir.join("tokens.db")).unwrap();
-    conn.pragma_update(None, "user_version", 2).unwrap();
+    conn.pragma_update(None, "user_version", 3).unwrap();
     drop(conn);
     assert!(matches!(
         TokenStore::open(&f.dir.join("tokens.db"), TokenKey::from_bytes(KEY)),
-        Err(Error::NewerSchema(2))
+        Err(Error::NewerSchema(3))
     ));
+}
+
+/// v1 had no read-budget counter; 0.1 is unreleased, so there's no
+/// migration and the file is refused with a clear error.
+#[test]
+fn a_tokens_db_from_before_read_budgets_is_refused() {
+    let f = fixture();
+    drop(f.tokens);
+    let conn = rusqlite::Connection::open(f.dir.join("tokens.db")).unwrap();
+    conn.pragma_update(None, "user_version", 1).unwrap();
+    drop(conn);
+    let opened = TokenStore::open(&f.dir.join("tokens.db"), TokenKey::from_bytes(KEY));
+    let Err(e @ Error::OldSchema(1)) = opened else {
+        panic!("expected OldSchema(1), got {:?}", opened.err());
+    };
+    assert!(e.to_string().contains("delete tokens.db"), "{e}");
 }
 
 #[test]

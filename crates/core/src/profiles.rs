@@ -17,8 +17,8 @@ use crate::verb::Verb;
 /// The Profiles used when there is no `profiles.toml`. Also the reference
 /// for the file's format: copy it and edit.
 ///
-/// `read_budget` is the number of reads a token may make; it's enforced by
-/// the Verb dispatcher. None of these allow `read-untrusted`,
+/// `read_budget` is the number of messages whose content a token may
+/// receive over its life; it's enforced by the Verb dispatcher. None of these allow `read-untrusted`,
 /// `attachment.fetch` or `send-request`: add them to a Profile on purpose.
 pub const DEFAULT_PROFILES: &str = r#"
 # Read and search only.
@@ -46,6 +46,9 @@ read_budget = 500
 max_ttl = "8h"
 "#;
 
+/// The one folder name compared without case.
+const INBOX: &str = "INBOX";
+
 /// Which Accounts, or which folders and labels, a [`Scope`] covers.
 /// Written `"*"` or as a list of names in `profiles.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,12 +68,35 @@ impl Selector {
         }
     }
 
+    /// [`Selector::allows`] for a folder or label. Names match exactly as
+    /// the provider reports them, except `INBOX`, which IMAP treats as
+    /// case-insensitive (RFC 3501). A parent never covers its subfolders.
+    pub fn allows_folder(&self, name: Option<&str>) -> bool {
+        let is_inbox = |name: &str| name.eq_ignore_ascii_case(INBOX);
+        match (self, name) {
+            (Selector::Only(names), Some(name)) if is_inbox(name) => {
+                names.iter().any(|listed| is_inbox(listed))
+            }
+            _ => self.allows(name),
+        }
+    }
+
     /// Whether everything `self` covers is also covered by `ceiling`.
     pub fn within(&self, ceiling: &Selector) -> bool {
         match (self, ceiling) {
             (_, Selector::All) => true,
             (Selector::All, Selector::Only(_)) => false,
             (Selector::Only(mine), Selector::Only(theirs)) => mine.is_subset(theirs),
+        }
+    }
+
+    /// [`Selector::within`] for folders, matching names the way
+    /// [`Selector::allows_folder`] does, so a scope narrowed to `inbox`
+    /// fits under a Profile that lists `INBOX`.
+    pub fn within_folders(&self, ceiling: &Selector) -> bool {
+        match self {
+            Selector::Only(mine) => mine.iter().all(|name| ceiling.allows_folder(Some(name))),
+            Selector::All => self.within(ceiling),
         }
     }
 
@@ -140,7 +166,7 @@ impl Scope {
     pub fn first_excess(&self, ceiling: &Scope) -> Option<&'static str> {
         if !self.accounts.within(&ceiling.accounts) {
             Some("accounts")
-        } else if !self.resources.within(&ceiling.resources) {
+        } else if !self.resources.within_folders(&ceiling.resources) {
             Some("resources")
         } else if !self.verbs.is_subset(&ceiling.verbs) {
             Some("verbs")
@@ -266,6 +292,17 @@ impl Profiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_scope_fits_its_ceiling_with_inbox_in_any_case() {
+        let ceiling = Selector::only(["INBOX", "Work"]);
+        assert!(Selector::only(["inbox"]).within_folders(&ceiling));
+        assert!(Selector::only(["Inbox", "Work"]).within_folders(&ceiling));
+        assert!(!Selector::only(["work"]).within_folders(&ceiling));
+        assert!(!Selector::only(["Work/Clients"]).within_folders(&ceiling));
+        assert!(!Selector::All.within_folders(&ceiling));
+        assert!(Selector::only(["anything"]).within_folders(&Selector::All));
+    }
 
     #[test]
     fn a_selector_is_within_a_ceiling_only_when_it_covers_less() {

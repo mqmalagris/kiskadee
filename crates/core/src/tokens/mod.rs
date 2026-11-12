@@ -20,6 +20,7 @@
 
 mod admin;
 mod admit;
+mod budget;
 mod seal;
 
 use std::fmt;
@@ -33,6 +34,7 @@ use crate::ledger::{self, Status};
 
 pub use admin::{MintRequest, Minted, Revoked, Secret, TokenInfo};
 pub use admit::{Admission, Denial, Grant, Request};
+pub use budget::Charge;
 pub use seal::TokenKey;
 
 /// Start of every token, so a leaked one is easy for secret scanners to spot.
@@ -47,7 +49,7 @@ const SECRET_BYTES: usize = 32;
 const INTERNAL_ERROR: &str = "internal";
 
 /// Schema version stored in `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r"
 CREATE TABLE tokens (
@@ -58,6 +60,7 @@ CREATE TABLE tokens (
     created_ms INTEGER NOT NULL,
     expires_ms INTEGER NOT NULL CHECK (expires_ms > created_ms),
     revoked_ms INTEGER,
+    reads_used INTEGER NOT NULL DEFAULT 0 CHECK (reads_used >= 0),
     seal       BLOB NOT NULL CHECK (length(seal) = 32)
 );
 ";
@@ -75,6 +78,9 @@ pub enum Error {
     Ledger(ledger::Error),
     NoWal(String),
     NewerSchema(i64),
+    /// The file was made by a pre-release kiskadee whose tokens can't be
+    /// carried over.
+    OldSchema(i64),
     /// The file is some other kind of database.
     WrongFile(PathBuf),
     Clock,
@@ -125,6 +131,10 @@ impl fmt::Display for Error {
             Error::NewerSchema(v) => write!(
                 f,
                 "token database schema v{v} is newer than this kiskadee (v{SCHEMA_VERSION}); upgrade kiskadee"
+            ),
+            Error::OldSchema(v) => write!(
+                f,
+                "token database schema v{v} is from a pre-release kiskadee and can't be upgraded; delete tokens.db and mint new tokens"
             ),
             Error::WrongFile(path) => {
                 write!(f, "{} is not a kiskadee token database", path.display())
@@ -194,6 +204,7 @@ impl TokenStore {
             SetupError::Sqlite(e) => Error::Sqlite(e),
             SetupError::NoWal(mode) => Error::NoWal(mode),
             SetupError::Newer(version) => Error::NewerSchema(version),
+            SetupError::Older(version) => Error::OldSchema(version),
             SetupError::WrongKind => Error::WrongFile(path.to_path_buf()),
         })?;
         Ok(TokenStore {

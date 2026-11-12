@@ -34,6 +34,16 @@ impl Verb {
         Verb::AttachmentFetch,
     ];
 
+    /// Whether the Verb returns message content, and so costs reads from
+    /// the token's budget: one per message. The others return metadata
+    /// and are free.
+    pub fn returns_content(self) -> bool {
+        matches!(
+            self,
+            Verb::Read | Verb::ReadUntrusted | Verb::AttachmentExtract
+        )
+    }
+
     /// The name used in `profiles.toml` and the Ledger.
     pub fn as_str(self) -> &'static str {
         match self {

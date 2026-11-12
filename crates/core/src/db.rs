@@ -30,6 +30,8 @@ pub(crate) enum SetupError {
     NoWal(String),
     /// The file was written by a newer kiskadee.
     Newer(i64),
+    /// The file was written by an older kiskadee, and there's no migration.
+    Older(i64),
     /// The file is some other kind of database.
     WrongKind,
 }
@@ -65,6 +67,7 @@ pub(crate) fn prepare(conn: &mut Connection, kind: &FileKind) -> Result<(), Setu
             tx.pragma_update(None, "user_version", kind.version)?;
         }
         found if found == kind.version => {}
+        older if older < kind.version => return Err(SetupError::Older(older)),
         newer => return Err(SetupError::Newer(newer)),
     }
     tx.commit()?;

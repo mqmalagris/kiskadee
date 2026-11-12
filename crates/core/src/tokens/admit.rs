@@ -3,7 +3,7 @@
 //! [`TokenStore::admit`] is the only way to check a token, and it writes the
 //! call's `begin` to the Ledger before anything else can fail; a denial or
 //! an error also gets its outcome there. Token and scope denials are made
-//! here. Later ones (read budget, rate limits) belong to the Verb
+//! here. Later ones (read budget, target scope) belong to the Verb
 //! dispatcher, which writes its `denied` outcome on the same `begin_seq`.
 
 use std::fmt;
@@ -39,9 +39,15 @@ pub struct Grant {
     token_id: String,
     scope: Scope,
     expires_ms: i64,
+    reads_used: u64,
 }
 
 impl Grant {
+    /// Reads left when the call was admitted. The charge after the Verb
+    /// runs is what counts; this is for an early denial.
+    pub fn reads_remaining(&self) -> u64 {
+        self.scope.read_budget.saturating_sub(self.reads_used)
+    }
     pub fn token_id(&self) -> &str {
         &self.token_id
     }
@@ -214,14 +220,34 @@ impl TokenStore {
         if !scope.accounts.allows(request.account) {
             return refuse(Denial::Account);
         }
-        if !scope.resources.allows(request.resource) {
+        if !scope.resources.allows_folder(request.resource) {
             return refuse(Denial::Resource);
         }
         Ok(Checked::Granted(Grant {
             token_id: row.id,
             scope,
             expires_ms: row.expires_ms,
+            reads_used: u64::try_from(row.reads_used).unwrap_or(u64::MAX),
         }))
+    }
+
+    /// The id of the intact token `presented` names, if any, without
+    /// writing to the Ledger. The Verb dispatcher uses it to pick a rate
+    /// limit before [`TokenStore::admit`] records anything.
+    pub fn identify(&self, presented: &str) -> Result<Option<String>> {
+        let presented = presented.trim_ascii();
+        if !well_formed(presented) {
+            return Ok(None);
+        }
+        let row = self
+            .conn
+            .query_row(
+                &format!("SELECT {ROW_COLUMNS} FROM tokens WHERE hash = ?1"),
+                [hash(presented).to_vec()],
+                Row::read,
+            )
+            .optional()?;
+        Ok(row.filter(|row| row.intact(&self.key)).map(|row| row.id))
     }
 }
 
