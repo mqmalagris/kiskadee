@@ -5,6 +5,7 @@
 //! `MailBackend` trait in `kiskadee-mail` (ADR 0002).
 
 mod db;
+pub mod dispatch;
 pub mod ledger;
 pub mod profiles;
 pub mod time;
