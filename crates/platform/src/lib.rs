@@ -4,6 +4,10 @@
 
 pub mod ipc;
 pub mod keychain;
+pub mod lock;
 pub mod paths;
+pub mod process;
+#[cfg(windows)]
+mod windows_pipe;
 #[cfg(windows)]
 mod windows_sid;

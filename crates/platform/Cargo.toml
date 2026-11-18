@@ -15,15 +15,21 @@ keyring-core = "1"
 workspace = true
 
 [target."cfg(windows)".dependencies]
+sha2.workspace = true
 widestring = "1"
 windows = { version = "0.62", features = ["Foundation", "Security_Credentials", "Security_Credentials_UI", "Security_Cryptography", "Storage_Streams", "Win32_System_Console", "Win32_System_WinRT", "Win32_Foundation"] }
 windows-native-keyring-store = "1.1.0"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [target."cfg(windows)".dev-dependencies]
 windows-future = "0.3"
 
+[target."cfg(unix)".dependencies]
+rustix = { version = "1", features = ["process"] }
+
 [dev-dependencies]
+tempfile.workspace = true
 chacha20poly1305 = "0.10"
 rand = "0.9"
-sha2 = "0.10"
+sha2.workspace = true
+
