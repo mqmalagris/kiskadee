@@ -19,6 +19,7 @@ fn call(verb: &str) -> Call {
         verb: verb.into(),
         target: Some("msg-42".into()),
         args_digest: digest(br#"{"limit":20}"#),
+        peer_pid: Some(4242),
     }
 }
 
@@ -65,25 +66,24 @@ fn tamper(sql: &str) -> kiskadee_core::ledger::Problem {
 }
 
 /// What someone with write access can do: rewrite rows, then recompute the
-/// whole chain. Re-implements the frozen v1 encoding from its spec in
+/// whole chain. Re-implements the frozen v2 encoding from its spec in
 /// `encoding.rs`, independently of the crate's code.
 fn forge(path: &Path, sql: &str) {
     let conn = raw(path);
     conn.execute_batch("DROP TRIGGER entries_no_update; DROP TRIGGER entries_no_delete;")
         .unwrap();
     conn.execute_batch(sql).unwrap();
-    let columns =
-        "seq, ts_ms, kind, actor, account, verb, target, args_digest, begin_seq, status, detail";
+    let columns = "seq, ts_ms, kind, actor, account, verb, target, args_digest, peer_pid, begin_seq, status, detail";
     let rows: Vec<Vec<Value>> = conn
         .prepare(&format!("SELECT {columns} FROM entries ORDER BY seq"))
         .unwrap()
-        .query_map([], |row| (0..11).map(|i| row.get::<_, Value>(i)).collect())
+        .query_map([], |row| (0..12).map(|i| row.get::<_, Value>(i)).collect())
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
     let mut prev = GENESIS;
     for row in rows {
-        let mut canonical = b"kiskadee/ledger/v1".to_vec();
+        let mut canonical = b"kiskadee/ledger/v2".to_vec();
         for value in &row {
             match value {
                 Value::Null => canonical.push(0x00),
@@ -271,7 +271,7 @@ fn verify_rejects_a_forged_outcome_for_a_missing_begin() {
     three_entries(&path);
     forge(
         &path,
-        "INSERT INTO entries VALUES (4, 0, 'outcome', NULL, NULL, NULL, NULL, NULL,
+        "INSERT INTO entries VALUES (4, 0, 'outcome', NULL, NULL, NULL, NULL, NULL, NULL,
             99, 'ok', NULL, zeroblob(32), zeroblob(32))",
     );
     let problem = Ledger::open(&path).unwrap().verify().unwrap().problem;
@@ -562,12 +562,59 @@ fn newer_schema_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ledger.db");
     drop(Ledger::open(&path).unwrap());
-    raw(&path).pragma_update(None, "user_version", 2).unwrap();
-    assert!(matches!(Ledger::open(&path), Err(Error::NewerSchema(2))));
+    raw(&path).pragma_update(None, "user_version", 3).unwrap();
+    assert!(matches!(Ledger::open(&path), Err(Error::NewerSchema(3))));
     assert!(matches!(
         Ledger::open_read_only(&path),
-        Err(Error::NewerSchema(2))
+        Err(Error::NewerSchema(3))
     ));
+}
+
+/// A v1 Ledger predates `peer_pid` and was never released: it's refused
+/// with a way out, never read with the wrong encoding.
+#[test]
+fn a_pre_release_v1_ledger_is_refused_with_a_delete_instruction() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.db");
+    drop(Ledger::open(&path).unwrap());
+    raw(&path).pragma_update(None, "user_version", 1).unwrap();
+    let Err(error) = Ledger::open(&path) else {
+        panic!("a v1 ledger must be refused")
+    };
+    assert!(matches!(error, Error::OldSchema(1)), "{error:?}");
+    assert!(error.to_string().contains("delete ledger.db"), "{error}");
+    assert!(matches!(
+        Ledger::open_read_only(&path),
+        Err(Error::OldSchema(1))
+    ));
+}
+
+#[test]
+fn the_peer_pid_is_kept_and_covered_by_the_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.db");
+    let mut ledger = Ledger::open(&path).unwrap();
+    ledger.begin(call("mail.list")).unwrap();
+    ledger
+        .begin(Call {
+            peer_pid: None,
+            ..call("mail.read")
+        })
+        .unwrap();
+    let pids: Vec<Option<u32>> = ledger
+        .since(0)
+        .unwrap()
+        .into_iter()
+        .map(|entry| match entry.body {
+            Body::Begin(call) => call.peer_pid,
+            Body::Outcome { .. } => panic!("only begins were written"),
+        })
+        .collect();
+    assert_eq!(pids, [Some(4242), None]);
+    drop(ledger);
+
+    let problem = tamper("UPDATE entries SET peer_pid = 1 WHERE seq = 1");
+    assert_eq!((problem.seq, problem.kind), (1, ProblemKind::HashMismatch));
 }
 
 #[test]

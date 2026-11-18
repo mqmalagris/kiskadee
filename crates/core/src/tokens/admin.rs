@@ -122,6 +122,9 @@ impl TokenStore {
             verb: MINT_VERB.into(),
             target: Some(id.clone()),
             args_digest: ledger::digest(&args),
+            // Admin Verbs run in the Broker's process until they arrive over the
+            // transport with user presence (Phase 2).
+            peer_pid: None,
         })?;
         match resolved.and_then(|resolved| self.insert(id, resolved)) {
             Ok(minted) => {
@@ -196,6 +199,7 @@ impl TokenStore {
             verb: REVOKE_VERB.into(),
             target: Some(id.to_string()),
             args_digest: ledger::digest(id.as_bytes()),
+            peer_pid: None,
         })?;
         let result = self.revoke_row(id);
         let (status, detail) = match &result {

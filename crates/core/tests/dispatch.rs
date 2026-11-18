@@ -148,22 +148,40 @@ impl Executor for Shared {
     }
 }
 
+/// A clock a test moves; `Send`, as the Broker's dispatcher clock must be.
+#[derive(Clone)]
+struct TestClock(std::sync::Arc<std::sync::atomic::AtomicI64>);
+
+impl TestClock {
+    fn new(ms: i64) -> Self {
+        TestClock(std::sync::Arc::new(ms.into()))
+    }
+
+    fn get(&self) -> i64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn set(&self, ms: i64) {
+        self.0.store(ms, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     dir: PathBuf,
     mail: Rc<FakeMail>,
-    clock: Rc<Cell<i64>>,
+    clock: TestClock,
     dispatcher: Dispatcher<Shared>,
 }
 
-fn open(dir: &Path, mail: &Rc<FakeMail>, clock: &Rc<Cell<i64>>) -> Dispatcher<Shared> {
+fn open(dir: &Path, mail: &Rc<FakeMail>, clock: &TestClock) -> Dispatcher<Shared> {
     let tokens = TokenStore::open(&dir.join("tokens.db"), TokenKey::from_bytes(KEY))
         .unwrap()
         .with_clock(|| Ok(NOW));
     let ledger = Ledger::open(&dir.join("ledger.db"))
         .unwrap()
         .with_clock(|| Ok(NOW));
-    let clock = Rc::clone(clock);
+    let clock = clock.clone();
     Dispatcher::new(tokens, ledger, Shared(Rc::clone(mail))).with_clock(move || Some(clock.get()))
 }
 
@@ -171,7 +189,7 @@ fn fixture(mail: FakeMail) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let mail = Rc::new(mail);
-    let clock = Rc::new(Cell::new(NOW));
+    let clock = TestClock::new(NOW);
     Fixture {
         dispatcher: open(&path, &mail, &clock),
         mail,
@@ -217,6 +235,7 @@ fn read_in<'a>(folder: Option<&'a str>, target: &'a str) -> VerbCall<'a> {
         limit: None,
         cursor: None,
         args: serde_json::Value::Null,
+        peer_pid: None,
     }
 }
 
@@ -229,6 +248,7 @@ fn list() -> VerbCall<'static> {
         limit: None,
         cursor: None,
         args: serde_json::Value::Null,
+        peer_pid: None,
     }
 }
 
@@ -863,4 +883,108 @@ fn restoring_an_older_sealed_row_refunds_the_reads_spent_since() {
     )
     .unwrap();
     assert_eq!(reply(f.call(&secret, &list())).reads_remaining, 10);
+}
+
+fn begin_of(entry: &Entry) -> &kiskadee_core::ledger::Call {
+    match &entry.body {
+        Body::Begin(call) => call,
+        Body::Outcome { .. } => panic!("expected a begin, got {entry:?}"),
+    }
+}
+
+/// The transport's peer pid reaches the Ledger for an admitted call and
+/// for one refused before its token was checked.
+#[test]
+fn the_peer_pid_is_logged_for_admitted_and_rate_limited_calls() {
+    let mut f = fixture(work_mail());
+    let secret = f.mint("reader");
+    let from_peer = VerbCall {
+        peer_pid: Some(4242),
+        ..list()
+    };
+    reply(f.call(&secret, &from_peer));
+    let entries = f.entries();
+    assert_eq!(begin_of(&entries[entries.len() - 2]).peer_pid, Some(4242));
+
+    for _ in 0..RATE_LIMIT {
+        f.call("not-a-token", &from_peer);
+    }
+    assert!(matches!(
+        refusal(f.call("not-a-token", &from_peer)),
+        Refusal::RateLimited { .. }
+    ));
+    let entries = f.entries();
+    let limited = begin_of(&entries[entries.len() - 2]);
+    assert_eq!(
+        (limited.actor.clone(), limited.peer_pid),
+        (Actor::UnknownToken, Some(4242))
+    );
+    assert_eq!(last_outcome(&entries).2.as_deref(), Some("rate.limited"));
+}
+
+mod locked {
+    use kiskadee_core::dispatch::Locked;
+
+    use super::*;
+
+    fn locked(dir: &Path) -> Locked {
+        let ledger = Ledger::open(&dir.join("ledger.db")).unwrap();
+        Locked::new(ledger).with_clock(|| Some(NOW))
+    }
+
+    /// AC-5 (core half): with no key nothing can be checked, so a `read`
+    /// with any token is refused `broker.locked`, logged as an unidentified
+    /// caller with the peer pid, and the token is never recorded.
+    #[test]
+    fn ac_5_a_locked_broker_refuses_every_call_and_logs_it_unidentified() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut locked = locked(dir.path());
+        let call = VerbCall {
+            peer_pid: Some(4242),
+            ..read("t4")
+        };
+        let refused = refusal(locked.call(&call).unwrap());
+        assert_eq!(refused, Refusal::Locked);
+        assert_eq!(refused.code(), "broker.locked");
+        assert_eq!(
+            refused.to_string(),
+            "kiskadee is locked; ask the user to unlock it"
+        );
+
+        let entries = locked.ledger().since(0).unwrap();
+        assert_eq!(entries.len(), 2);
+        let begin = begin_of(&entries[0]);
+        assert_eq!(begin.actor, Actor::UnknownToken);
+        assert_eq!(
+            (begin.account.as_deref(), begin.target.as_deref()),
+            (None, None)
+        );
+        assert_eq!(begin.peer_pid, Some(4242));
+        assert_eq!(last_outcome(&entries), denied("broker.locked"));
+    }
+
+    #[test]
+    fn a_locked_broker_rate_limits_its_callers_as_one_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut locked = locked(dir.path());
+        for _ in 0..RATE_LIMIT {
+            assert_eq!(refusal(locked.call(&list()).unwrap()), Refusal::Locked);
+        }
+        assert!(matches!(
+            refusal(locked.call(&read("t4")).unwrap()),
+            Refusal::RateLimited { .. }
+        ));
+        assert!(matches!(
+            refusal(locked.call(&list()).unwrap()),
+            Refusal::RateLimited { .. }
+        ));
+        let entries = locked.ledger().since(0).unwrap();
+        assert_eq!(
+            entries.len(),
+            2 * (RATE_LIMIT + 1),
+            "one rate-limited call logged"
+        );
+        assert_eq!(last_outcome(&entries), denied("rate.limited"));
+        assert_eq!(locked.rate_limited_unlogged(), 1);
+    }
 }

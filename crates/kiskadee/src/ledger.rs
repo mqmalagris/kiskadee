@@ -122,13 +122,16 @@ fn line(entry: &Entry) -> String {
     let head = format!("#{:<5} {}", entry.seq, timestamp(entry.ts_ms));
     match &entry.body {
         Body::Begin(call) => format!(
-            "{head}  begin    {}  {}  {}{}",
+            "{head}  begin    {}  {}  {}{}{}",
             clean(&call.actor.to_string()),
             clean(call.account.as_deref().unwrap_or("-")),
             clean(&call.verb),
             call.target
                 .as_deref()
                 .map(|target| format!(" {}", clean(target)))
+                .unwrap_or_default(),
+            call.peer_pid
+                .map(|pid| format!("  pid={pid}"))
                 .unwrap_or_default()
         ),
         Body::Outcome {
