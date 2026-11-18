@@ -25,6 +25,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 windows-future = "0.3"
 
 [target."cfg(unix)".dependencies]
+libc = "0.2"
 rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]

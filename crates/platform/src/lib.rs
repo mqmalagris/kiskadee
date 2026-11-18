@@ -5,6 +5,8 @@
 pub mod ipc;
 pub mod keychain;
 pub mod lock;
+#[cfg(target_os = "macos")]
+mod macos_peer;
 pub mod paths;
 pub mod process;
 #[cfg(windows)]

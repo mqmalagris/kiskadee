@@ -1431,6 +1431,7 @@ dependencies = [
  "dirs",
  "interprocess",
  "keyring-core",
+ "libc",
  "rand 0.9.5",
  "rustix",
  "sha2",

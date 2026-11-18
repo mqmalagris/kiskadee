@@ -69,7 +69,7 @@ pub fn check(stream: &Stream, expected: &Identity) -> Result<Peer, Refused> {
     let pid = creds.pid();
     #[cfg(unix)]
     let (pid, actual) = {
-        let pid = pid.and_then(|pid| u32::try_from(pid).ok());
+        let pid = unix_pid(stream, pid);
         let euid = creds.euid().ok_or_else(|| {
             Refused::Unreadable(io::Error::new(io::ErrorKind::Unsupported, "no peer euid"))
         })?;
@@ -93,7 +93,7 @@ pub fn check_server(conn: &Conn, expected: &Identity) -> Result<Peer, Refused> {
     #[cfg(unix)]
     let (pid, actual) = {
         let creds = conn.socket().peer_creds().map_err(Refused::Unreadable)?;
-        let pid = creds.pid().and_then(|pid| u32::try_from(pid).ok());
+        let pid = unix_pid(conn.socket(), creds.pid());
         let euid = creds.euid().ok_or_else(|| {
             Refused::Unreadable(io::Error::new(io::ErrorKind::Unsupported, "no server euid"))
         })?;
@@ -107,6 +107,26 @@ pub fn check_server(conn: &Conn, expected: &Identity) -> Result<Peer, Refused> {
         (Some(pid), Identity(sid))
     };
     matches(pid, &actual, expected)
+}
+
+/// The other end's pid: from its credentials where the OS puts it there
+/// (Linux), else from `LOCAL_PEERPID` on macOS. `None` if neither says.
+#[cfg(unix)]
+fn unix_pid(stream: &Stream, from_creds: Option<libc::pid_t>) -> Option<u32> {
+    if let Some(pid) = from_creds.and_then(|pid| u32::try_from(pid).ok()) {
+        return Some(pid);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsFd;
+        let Stream::UdSocket(socket) = stream;
+        return crate::macos_peer::peer_pid(socket.inner().as_fd()).ok();
+    }
+    #[allow(unreachable_code, reason = "macOS returns above")]
+    {
+        let _ = stream;
+        None
+    }
 }
 
 fn matches(pid: Option<u32>, actual: &Identity, expected: &Identity) -> Result<Peer, Refused> {
