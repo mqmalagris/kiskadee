@@ -16,3 +16,13 @@ pub fn data_dir() -> Option<PathBuf> {
 pub fn ledger_db() -> Option<PathBuf> {
     data_dir().map(|dir| dir.join("ledger.db"))
 }
+
+/// `tokens.db`, the Capability token store (ADR 0004).
+pub fn tokens_db() -> Option<PathBuf> {
+    data_dir().map(|dir| dir.join("tokens.db"))
+}
+
+/// Where an auto-started Broker writes its output.
+pub fn broker_log() -> Option<PathBuf> {
+    data_dir().map(|dir| dir.join("broker.log"))
+}
