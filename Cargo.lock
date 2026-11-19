@@ -1389,6 +1389,8 @@ dependencies = [
  "kiskadee-mail",
  "kiskadee-platform",
  "rusqlite",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 
