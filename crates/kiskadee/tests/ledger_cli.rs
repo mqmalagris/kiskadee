@@ -26,6 +26,7 @@ fn seed(home: &Path) {
             verb: "mail.list".into(),
             target: Some("inbox\u{1b}[2J".into()),
             args_digest: digest(b"{}"),
+            peer_pid: Some(4242),
         })
         .unwrap();
     ledger.outcome(seq, Status::Ok, None).unwrap();
@@ -36,6 +37,7 @@ fn seed(home: &Path) {
             verb: "mail.read".into(),
             target: None,
             args_digest: digest(b"{}"),
+            peer_pid: Some(4242),
         })
         .unwrap();
 }
@@ -106,7 +108,7 @@ fn list_shows_recent_entries_with_control_characters_replaced() {
     let text = stdout(&kiskadee(home.path(), &["ledger", "--since", "1h"]));
     assert_eq!(text.lines().count(), 3, "{text}");
     assert!(
-        text.contains("token:t1  work  mail.list inbox?[2J"),
+        text.contains("token:t1  work  mail.list inbox?[2J  pid=4242"),
         "{text}"
     );
     assert!(

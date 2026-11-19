@@ -1,14 +1,14 @@
-//! Canonical byte encoding of a Ledger row, version 1.
+//! Canonical byte encoding of a Ledger row, version 2.
 //!
 //! **Frozen.** Changing anything here breaks verification of every Ledger
 //! already written; a new encoding needs a new domain string and a migration
 //! path. The pinned test vector below exists to catch accidental changes.
 //!
 //! ```text
-//! canonical(row) = "kiskadee/ledger/v1"
+//! canonical(row) = "kiskadee/ledger/v2"
 //!                  || field(seq) || field(ts_ms) || field(kind)
 //!                  || field(actor) || field(account) || field(verb)
-//!                  || field(target) || field(args_digest)
+//!                  || field(target) || field(args_digest) || field(peer_pid)
 //!                  || field(begin_seq) || field(status) || field(detail)
 //!
 //! field(NULL)    = 0x00
@@ -26,17 +26,16 @@
 
 use sha2::{Digest, Sha256};
 
-pub(crate) const DOMAIN: &[u8] = b"kiskadee/ledger/v1";
+pub(crate) const DOMAIN: &[u8] = b"kiskadee/ledger/v2";
 
 /// `prev_hash` of the first row.
 pub const GENESIS: [u8; 32] = [0; 32];
 
 /// The column values of one row, in canonical order.
-pub(crate) const COLUMNS: &str =
-    "seq, ts_ms, kind, actor, account, verb, target, args_digest, begin_seq, status, detail";
+pub(crate) const COLUMNS: &str = "seq, ts_ms, kind, actor, account, verb, target, args_digest, peer_pid, begin_seq, status, detail";
 
 /// Number of fields in [`COLUMNS`].
-pub(crate) const FIELD_COUNT: usize = 11;
+pub(crate) const FIELD_COUNT: usize = 12;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Field<'a> {
@@ -103,10 +102,12 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// Pinned v1 test vector. If this fails, the encoding changed and every
+    /// Pinned v2 test vector. If this fails, the encoding changed and every
     /// existing Ledger would stop verifying: revert, don't update the vector.
+    /// (v2 replaced v1 before any release, to add `peer_pid`; v1 files are
+    /// refused, not read.)
     #[test]
-    fn v1_test_vector_is_stable() {
+    fn v2_test_vector_is_stable() {
         let digest = [0xab; 32];
         let fields = [
             Field::Int(1),
@@ -117,6 +118,7 @@ mod tests {
             Field::Text("mail.list"),
             Field::Null,
             Field::Blob(&digest),
+            Field::Int(4242),
             Field::Null,
             Field::Null,
             Field::Null,
@@ -125,7 +127,7 @@ mod tests {
         assert_eq!(
             hex(&bytes),
             concat!(
-                "6b69736b616465652f6c65646765722f7631",
+                "6b69736b616465652f6c65646765722f7632",
                 "010000000000000001",
                 "01000001a17720ca00",
                 "0200000005626567696e",
@@ -134,6 +136,7 @@ mod tests {
                 "02000000096d61696c2e6c697374",
                 "00",
                 "0300000020abababababababababababababababababababababababababababababababab",
+                "010000000000001092",
                 "00",
                 "00",
                 "00",
@@ -142,7 +145,7 @@ mod tests {
         // Computed independently (Python hashlib) from the bytes above.
         assert_eq!(
             hex(&chain(&GENESIS, &bytes)),
-            "026d7f9c00c412b8ce5510066b7661b68cd82d9b5a25e055df60d3362ab272ff"
+            "7e8e2ed708095d295acd30b3e2afe221f0fda36ea5dac9862553ff5c8d5b693e"
         );
     }
 

@@ -72,6 +72,7 @@ fn request<'a>(verb: Verb, account: Option<&'a str>, resource: Option<&'a str>) 
         resource,
         target: Some("msg-1"),
         args_digest: digest(b"{}"),
+        peer_pid: None,
     }
 }
 

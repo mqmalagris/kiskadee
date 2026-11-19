@@ -40,6 +40,7 @@ const TARGET_UNAVAILABLE: &str = "target.unavailable";
 const TARGET_MISSING: &str = "target.missing";
 const TARGET_ACCOUNT: &str = "target.account";
 const VERB_UNSUPPORTED: &str = "verb.unsupported";
+const BROKER_LOCKED: &str = "broker.locked";
 const BACKEND_ERROR: &str = "backend";
 const INTERNAL_ERROR: &str = "internal";
 
@@ -60,6 +61,9 @@ pub struct VerbCall<'a> {
     /// The Verb's own arguments (a search query, say), passed to the
     /// backend as they are.
     pub args: serde_json::Value,
+    /// The calling process, set by the Broker's transport from the OS, never
+    /// from what the agent sent. Recorded in the Ledger, not in the digest.
+    pub peer_pid: Option<u32>,
 }
 
 /// Where a message lives.
@@ -131,6 +135,9 @@ pub enum Refusal {
     },
     /// The backend doesn't support this Verb yet.
     Unsupported,
+    /// The Broker hasn't been unlocked this session, so it can't check any
+    /// token (ADR 0004).
+    Locked,
 }
 
 impl Refusal {
@@ -141,6 +148,7 @@ impl Refusal {
             Refusal::BudgetExhausted { .. } => BUDGET_EXHAUSTED,
             Refusal::RateLimited { .. } => RATE_LIMITED,
             Refusal::Unsupported => VERB_UNSUPPORTED,
+            Refusal::Locked => BROKER_LOCKED,
         }
     }
 }
@@ -160,6 +168,7 @@ impl fmt::Display for Refusal {
                 write!(f, "too many calls; retry in {retry_after_s}s")
             }
             Refusal::Unsupported => f.write_str("this Verb isn't available yet"),
+            Refusal::Locked => f.write_str("kiskadee is locked; ask the user to unlock it"),
         }
     }
 }
@@ -238,7 +247,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Milliseconds since the Unix epoch; `None` before 1970. A closure, so a
 /// test can move it.
-pub type Clock = Box<dyn Fn() -> Option<i64>>;
+pub type Clock = Box<dyn Fn() -> Option<i64> + Send>;
 
 /// How an admitted call ended: the Ledger outcome and what the agent gets.
 struct Finished {
@@ -277,7 +286,7 @@ impl<E: Executor> Dispatcher<E> {
     }
 
     /// Replaces the wall clock the rate limits use. For tests.
-    pub fn with_clock(mut self, clock: impl Fn() -> Option<i64> + 'static) -> Self {
+    pub fn with_clock(mut self, clock: impl Fn() -> Option<i64> + Send + 'static) -> Self {
         self.clock = Box::new(clock);
         self
     }
@@ -307,17 +316,8 @@ impl<E: Executor> Dispatcher<E> {
             self.limiter.check(caller.as_deref(), now_ms)
         {
             if log {
-                // Nothing the caller sent goes in but the Verb: a flood
-                // can't write text into the Ledger.
-                let seq = self.ledger.begin(ledger::Call {
-                    actor: caller.map_or(Actor::UnknownToken, Actor::Token),
-                    account: None,
-                    verb: call.verb.as_str().into(),
-                    target: None,
-                    args_digest,
-                })?;
-                self.ledger
-                    .outcome(seq, Status::Denied, Some(RATE_LIMITED))?;
+                let actor = caller.map_or(Actor::UnknownToken, Actor::Token);
+                deny_unchecked(&mut self.ledger, actor, call, args_digest, RATE_LIMITED)?;
             }
             return Ok(Response::Refused(Refusal::RateLimited { retry_after_s }));
         }
@@ -327,6 +327,7 @@ impl<E: Executor> Dispatcher<E> {
             resource: call.resource,
             target: call.target,
             args_digest,
+            peer_pid: call.peer_pid,
         };
         let (grant, begin_seq) = match self.tokens.admit(&mut self.ledger, presented, &request)? {
             Admission::Admitted { grant, begin_seq } => (grant, begin_seq),
@@ -436,6 +437,94 @@ impl<E: Executor> Dispatcher<E> {
             Charge::Expired => Ok(token_refused(Denial::Expired)),
         }
     }
+}
+
+/// The calls a Broker gets before it's unlocked. With no `TokenKey` no
+/// token can be checked, so every Verb call is refused with
+/// [`Refusal::Locked`] and logged as an unidentified caller, sharing that
+/// caller's rate limit.
+pub struct Locked {
+    ledger: Ledger,
+    limiter: RateLimiter,
+    clock: Clock,
+}
+
+impl Locked {
+    pub fn new(ledger: Ledger) -> Self {
+        Locked {
+            ledger,
+            limiter: RateLimiter::default(),
+            clock: Box::new(crate::time::now_ms),
+        }
+    }
+
+    /// Replaces the wall clock the rate limit uses. For tests.
+    pub fn with_clock(mut self, clock: impl Fn() -> Option<i64> + Send + 'static) -> Self {
+        self.clock = Box::new(clock);
+        self
+    }
+
+    pub fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
+
+    /// Rate-limited calls left out of the Ledger since the Broker started.
+    pub fn rate_limited_unlogged(&self) -> u64 {
+        self.limiter.unlogged()
+    }
+
+    /// Refuses `call`. The token isn't looked at, so it's never recorded.
+    pub fn call(&mut self, call: &VerbCall<'_>) -> Result<Response> {
+        let now_ms = (self.clock)().ok_or(Error::Clock)?;
+        let args_digest = args_digest(call)?;
+        let refusal = match self.limiter.check(None, now_ms) {
+            Verdict::Limited { retry_after_s, log } => {
+                if log {
+                    deny_unchecked(
+                        &mut self.ledger,
+                        Actor::UnknownToken,
+                        call,
+                        args_digest,
+                        RATE_LIMITED,
+                    )?;
+                }
+                Refusal::RateLimited { retry_after_s }
+            }
+            Verdict::Allowed => {
+                let code = Refusal::Locked.code();
+                deny_unchecked(
+                    &mut self.ledger,
+                    Actor::UnknownToken,
+                    call,
+                    args_digest,
+                    code,
+                )?;
+                Refusal::Locked
+            }
+        };
+        Ok(Response::Refused(refusal))
+    }
+}
+
+/// Logs a call refused before its token was checked. Nothing the caller
+/// sent goes in but the Verb, so a flood can't write text into the Ledger.
+fn deny_unchecked(
+    ledger: &mut Ledger,
+    actor: Actor,
+    call: &VerbCall<'_>,
+    args_digest: [u8; 32],
+    code: &str,
+) -> Result<()> {
+    let seq = ledger.begin(ledger::Call {
+        actor,
+        account: None,
+        verb: call.verb.as_str().into(),
+        target: None,
+        args_digest,
+        peer_pid: call.peer_pid,
+    })?;
+    ledger.outcome(seq, Status::Denied, Some(code))?;
+    Ok(())
 }
 
 fn token_refused(denial: Denial) -> Finished {

@@ -30,6 +30,9 @@ pub struct Request<'a> {
     pub target: Option<&'a str>,
     /// SHA-256 of the call's canonical arguments.
     pub args_digest: [u8; 32],
+    /// The calling process, from the transport; recorded whether or not
+    /// the token is known, since the OS vouches for it, not the caller.
+    pub peer_pid: Option<u32>,
 }
 
 /// Proof that [`TokenStore::admit`] let a call through. Only `admit`
@@ -162,6 +165,7 @@ impl TokenStore {
             verb: request.verb.as_str().into(),
             target: recorded(request.target),
             args_digest: request.args_digest,
+            peer_pid: request.peer_pid,
         })?;
         match checked {
             Ok(Checked::Granted(grant)) => Ok(Admission::Admitted { grant, begin_seq }),

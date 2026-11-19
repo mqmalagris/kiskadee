@@ -33,7 +33,7 @@ pub use encoding::GENESIS;
 use encoding::{COLUMNS, FIELD_COUNT, Field};
 
 /// Schema version stored in `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// A Ledger file. Its `application_id` spells "kLdg".
 const FILE: FileKind = FileKind {
@@ -54,6 +54,7 @@ CREATE TABLE entries (
     verb        TEXT,
     target      TEXT,
     args_digest BLOB,
+    peer_pid    INTEGER,
     begin_seq   INTEGER,
     status      TEXT,
     detail      TEXT,
@@ -64,7 +65,7 @@ CREATE TABLE entries (
     CHECK (kind <> 'outcome' OR (begin_seq IS NOT NULL
         AND status IN ('ok', 'denied', 'error', 'conflict')
         AND actor IS NULL AND account IS NULL AND verb IS NULL
-        AND target IS NULL AND args_digest IS NULL))
+        AND target IS NULL AND args_digest IS NULL AND peer_pid IS NULL))
 );
 CREATE UNIQUE INDEX entries_one_outcome ON entries (begin_seq) WHERE kind = 'outcome';
 CREATE INDEX entries_ts ON entries (ts_ms);
@@ -86,11 +87,12 @@ mod col {
     pub const VERB: usize = 5;
     pub const TARGET: usize = 6;
     pub const ARGS_DIGEST: usize = 7;
-    pub const BEGIN_SEQ: usize = 8;
-    pub const STATUS: usize = 9;
-    pub const DETAIL: usize = 10;
-    pub const PREV_HASH: usize = 11;
-    pub const HASH: usize = 12;
+    pub const PEER_PID: usize = 8;
+    pub const BEGIN_SEQ: usize = 9;
+    pub const STATUS: usize = 10;
+    pub const DETAIL: usize = 11;
+    pub const PREV_HASH: usize = 12;
+    pub const HASH: usize = 13;
 }
 
 static INSERT: LazyLock<String> = LazyLock::new(|| {
@@ -192,6 +194,9 @@ pub struct Call {
     pub target: Option<String>,
     /// SHA-256 of the call's canonical arguments; see [`digest`].
     pub args_digest: [u8; 32],
+    /// The calling process, as the Broker's transport saw it. `None` for a
+    /// call made inside the Broker's own process.
+    pub peer_pid: Option<u32>,
 }
 
 /// One Ledger row.
@@ -240,6 +245,8 @@ impl Entry {
                 Field::Text(&call.verb),
                 Field::text(call.target.as_deref()),
                 Field::Blob(&call.args_digest),
+                call.peer_pid
+                    .map_or(Field::Null, |pid| Field::Int(i64::from(pid))),
                 Field::Null,
                 Field::Null,
                 Field::Null,
@@ -252,6 +259,7 @@ impl Entry {
                 seq,
                 ts,
                 kind,
+                Field::Null,
                 Field::Null,
                 Field::Null,
                 Field::Null,
@@ -398,6 +406,9 @@ pub enum Error {
     NotALedger(PathBuf),
     /// The file was written by a newer kiskadee.
     NewerSchema(i64),
+    /// The file was written by an older, unreleased kiskadee. There's no
+    /// migration: delete it.
+    OldSchema(i64),
     /// SQLite refused WAL mode; it reported this journal mode instead.
     NoWal(String),
     /// The system clock is before the Unix epoch, so a call can't be timestamped.
@@ -417,6 +428,11 @@ impl fmt::Display for Error {
             Error::NewerSchema(v) => write!(
                 f,
                 "ledger schema v{v} is newer than this kiskadee (v{SCHEMA_VERSION}); upgrade kiskadee"
+            ),
+            Error::OldSchema(v) => write!(
+                f,
+                "ledger schema v{v} is from a pre-release kiskadee and can't be read; \
+                 delete ledger.db and start a new Ledger"
             ),
             Error::NoWal(mode) => write!(
                 f,
@@ -482,6 +498,7 @@ impl Ledger {
                 clock: Box::new(now_ms),
             }),
             0 => Err(Error::NotALedger(path.to_path_buf())),
+            older if older < SCHEMA_VERSION => Err(Error::OldSchema(older)),
             newer => Err(Error::NewerSchema(newer)),
         }
     }
@@ -671,6 +688,10 @@ impl Ledger {
                         .get::<_, Option<Vec<u8>>>(col::ARGS_DIGEST)?
                         .and_then(|d| d.try_into().ok())
                         .ok_or_else(|| corrupt("bad args digest"))?,
+                    peer_pid: row
+                        .get::<_, Option<i64>>(col::PEER_PID)?
+                        .map(|pid| u32::try_from(pid).map_err(|_| corrupt("bad peer pid")))
+                        .transpose()?,
                 }),
                 "outcome" => Body::Outcome {
                     begin_seq: row
@@ -756,8 +777,7 @@ fn setup_error(e: SetupError, path: &Path) -> Error {
         SetupError::Sqlite(e) => Error::Sqlite(e),
         SetupError::NoWal(mode) => Error::NoWal(mode),
         SetupError::Newer(version) => Error::NewerSchema(version),
-        // v1 is the first Ledger schema, so no file is older.
-        SetupError::Older(version) => Error::Corrupt(format!("unknown schema v{version}")),
+        SetupError::Older(version) => Error::OldSchema(version),
         SetupError::WrongKind => Error::NotALedger(path.to_path_buf()),
     }
 }
